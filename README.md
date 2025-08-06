@@ -1,5 +1,5 @@
 # InSim-LFS-Drift
-InSim PY Script to track Drift Score in LFS
+InSim PY Script to track Drift Score in LFS (Runtime only. Saving to DB is unfinished atm)
 
 open folder in cmd and just py/python3 insim.py
 
