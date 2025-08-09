@@ -7,10 +7,12 @@ import threading
 import time
 import sqlite3
 import insimconfig as CFG
+import isptranslation as T
 
 BUFFER_SIZE = 2048
 INSIM_VERSION = 9
 
+# currently used(?) packets
 ISP_ISI = 1 # InSim Init
 ISP_VER = 2 # Version info
 ISP_TINY = 3 # Multi purpose
@@ -33,7 +35,8 @@ ISP_CRS = 41 # car reset
 ISP_BFN = 42 # delete button / receive btn req
 ISP_AXI = 43 # autocross lay info
 ISP_BTN = 45 # show btn on local/remote scr
-ISP_OBH = 51
+ISP_OBH = 51 # object collision with car
+ISP_AXM = 54 # layout changes if set to clear
 ISP_JRR = 58 # reply to join req
 ISP_UCO = 59 # insim checkpoint / cicle
 ISP_CSC = 63 # car state change
@@ -124,8 +127,10 @@ create table if not exists hiScores (
   ''')
 
 sqlC.commit()
+
 __dat = b''
 __fc = 1
+
 while __dat == b'':
   if __fc:
     __fc = 0
@@ -141,7 +146,7 @@ while __dat == b'':
             0,       # Zero
             
             0,       # UDPPort
-            32 + 4 * IsLocal + 128,   # Flags
+            32 + 4 * IsLocal + 128 + 1024,   # Flags
 
             INSIM_VERSION, # Sp0
             b'S',     # Prefix
@@ -166,7 +171,8 @@ Score = 6
 LastLapTime = 7
 Tracking = 8
 OldScore = 9
-LastElement = 10
+PenaltiesSum = 10
+LastElement = 11
 
 Scores = []
 
@@ -198,6 +204,7 @@ def resetCar(plid, doPrint=True):
   Scores[Score][plid] = 0
   Scores[Tracking][plid] = False
   Scores[OldScore][plid] = 0
+  Scores[PenaltiesSum][plid] = 0
   if doPrint:
     print("Car reset:", plid)
 
@@ -453,7 +460,14 @@ def ISP_LAP_H(data, size):
   plid = data[3]
   laptimems = struct.unpack("i",data[4:8])[0]
   print(Scores[Score][plid], plid, laptimems)
-
+  penalties = False
+  penval = Scores[PenaltiesSum][plid]
+  if penval == 0: 
+    penalties = "0"
+  elif penval > 0:
+    penalties = "^2+" + str(penval) + "^7"
+  else:
+    penalties = "^1" + str(penval) + "^7"
   if plid in plidToUName:
     uname = plidToUName[plid]
     if IsLocal:
@@ -462,9 +476,9 @@ def ISP_LAP_H(data, size):
           ISP_MSL,
           0,
           0,
-          f"{uname}^7 -> {int(Scores[Score][plid])} in {laptimems/1000}".encode("cp1252")))
+          f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems/1000}".encode("cp1252")))
     else:
-      msg = f"{uname}^7 -> {int(Scores[Score][plid])} in {laptimems/1000}".encode("cp1252")
+      msg = f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems/1000}".encode("cp1252")
       msglen = ( ( len(msg) + 1) // 4 ) + 1 # needed for guaranteed \0
       sock.send(struct.pack("BBBBBBBB",
           ISP_MTC_SIZE + msglen, #34,
@@ -586,13 +600,14 @@ def ISP_OBH_H(data, size):
     y /= 16
     print(f"{plname} hit unknown object? @[ {x}, {y} ]")
   obhflags = data[size * 4 - 1]
-  #wasmoving = obhflags & 4
+  wasmoving = obhflags & 4
+  if wasmoving:
+    return
   #inorigspot = obhflags & 8
   # reverse for hitting static objects you get double penalty
   moveableobject = 0 if (obhflags & 2) == 2 else 1
 
-  print(f"{plname} hit: f:{obhflags} i:{index} ismoveable:{moveableobject}")
-  
+  #print(f"{plname} hit: f:{obhflags} i:{index} ismoveable:{moveableobject}")
   if not plid in Scores[Tracking]:
     print("resetting", plid)
     resetCar(plid, False)
@@ -604,8 +619,8 @@ def ISP_OBH_H(data, size):
     pen = CFG.OBJ_PENALTY_LIST[index]
   else:
     pen = CFG.OBJ_DEFAULT_PENALTY
-
-  Scores[Score][plid] += pen + ( pen * CFG.OBJ_STATIC_PENALTY_MULT * moveableobject )
+  pen += ( pen * CFG.OBJ_STATIC_PENALTY_MULT * moveableobject )
+  Scores[Score][plid] += pen
   if pen == 0:
     penCol = "^6"
   elif pen > 0 :
@@ -624,9 +639,15 @@ def ISP_OBH_H(data, size):
     penCol + str(int(Scores[Score][plid])).encode("cp1252"),
     # constant col for score cuz we have no upper limit ->> penaltied color now
     ))
-  
+  Scores[PenaltiesSum][plid] += pen
 
 packetHandler[ISP_OBH] = ISP_OBH_H
+
+def ISP_AXM_H(data, size):
+  print("ISP_AXM:", data[5], "<empty>")
+  if data[5] == 3: # PMO_CLEAR_ALL
+    layoutData["id"] = "<empty>"
+packetHandler[ISP_AXM] = ISP_AXM_H
 
 
 def netHandler(PacketBuffer, stateMachine):
@@ -643,12 +664,15 @@ def netHandler(PacketBuffer, stateMachine):
       data = data[:size * 4]
     packetType = data[1]
     if lastPacketType != packetType:
-      print(f"<<sz[{size}]: type->{packetType}")
+      print(f"<<sz[{size}]: type->{T.IDTOSTR[packetType]}")
       lastPacketType = packetType
     if packetHandler[packetType]:
       packetHandler[packetType](data, size)
     else:
-      print(f"unknown packet  type:{packetType} sz:{size}({size*4}bytes) d:{data}")
+      if T.IDTOSTR[packetType]:
+        print(f"unhandled packet type: {T.IDTOSTR[packetType]} sz:{size}({size*4}bytes)")
+      else:
+        print(f"unknown packet type:{packetType} sz:{size}({size * 4}bytes) d:{data}")
 
   stateMachine["netHandler"] = 0
 
