@@ -13,3 +13,22 @@ REMOTE_INSIM_PASSWORD = b'<password>' # max 16 bytes (chars) #idk if 0byte is al
 INSIM_DB_PATH = "insim.db"
 
 MAX_DRIFT_ANGLE = 113
+
+
+# this amount gets added to player score if they hit an object
+# works with all objects static and dynamic (cones, rails, ramps, whatever)
+# also works with negatives.
+# https://en.lfsmanual.net/wiki/List_of_autocross_layout_objects
+OBJ_PENALTY_LIST = { 
+  25 : 150, # name:"Cone Green" ; objectindex:25 (AXO_CONE_GREEN) ; movable:Yes
+  26 : 150, # "Cone Green2"
+  42 : 150, # "Cone Green Ptr" (green cone on its side)
+  136 : 150, # "Post Green"
+  144 : -100, # "Bale"
+}
+
+# if its not in the list this value gets added instead
+OBJ_DEFAULT_PENALTY = -100
+
+# how much static objects multiply penalty by
+OBJ_STATIC_PENALTY_MULT = 1.5

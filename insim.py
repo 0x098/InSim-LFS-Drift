@@ -33,6 +33,7 @@ ISP_CRS = 41 # car reset
 ISP_BFN = 42 # delete button / receive btn req
 ISP_AXI = 43 # autocross lay info
 ISP_BTN = 45 # show btn on local/remote scr
+ISP_OBH = 51
 ISP_JRR = 58 # reply to join req
 ISP_UCO = 59 # insim checkpoint / cicle
 ISP_CSC = 63 # car state change
@@ -73,6 +74,8 @@ TINY_NCI = 23 # get NCI for all players (unused atm)
 TINY_AXI = 20 # get layout into etc
 
 heatMapColStr = [b"^7", b"^4", b"^6", b"^2", b"^3", b"^1", b"^5", b"^0"]
+HEATMAPLEN = len(heatMapColStr)
+COLPERANGLE = CFG.MAX_DRIFT_ANGLE / HEATMAPLEN
 
 #struct.pack
 #// char    1-byte character -> c (1)
@@ -88,7 +91,11 @@ plidToUcid = {}
 ucidToPlid = {}
 plidToUName = {}
 
-LayoutID = ""
+DRIFT_BUTTON_SCR = 0
+DRIFT_BUTTON_DEG = 1
+DRIFT_BUTTON_KPH = 2
+
+layoutData = {"id" : "<empty>"}
 
 IsLocal = 0
 
@@ -134,7 +141,7 @@ while __dat == b'':
             0,       # Zero
             
             0,       # UDPPort
-            32 + 4 * IsLocal,   # Flags
+            32 + 4 * IsLocal + 128,   # Flags
 
             INSIM_VERSION, # Sp0
             b'S',     # Prefix
@@ -158,7 +165,8 @@ LocVel = 5
 Score = 6
 LastLapTime = 7
 Tracking = 8
-LastElement = 9
+OldScore = 9
+LastElement = 10
 
 Scores = []
 
@@ -189,8 +197,13 @@ def resetCar(plid, doPrint=True):
   Scores[ScoAng][plid] = 0
   Scores[Score][plid] = 0
   Scores[Tracking][plid] = False
+  Scores[OldScore][plid] = 0
   if doPrint:
     print("Car reset:", plid)
+
+carobjids = ["dir", "heading", "speed", "zbyte", "x", "y"]
+def unpackCarObj(bytes):
+  return dict(zip(carobjids, struct.unpack("4B2h", bytes)))
 
 def startTrackingCar(plid, doPrint=True):
   if not Scores[Tracking][plid]:
@@ -264,9 +277,7 @@ receiverThread = threading.Thread(target=netReceiver, args=(PacketBuffer, stateM
 receiverThread.start()
 
 
-
 packetHandler = [None] * 128
-
 
 
 def ISP_VER_H(data, size):
@@ -349,25 +360,26 @@ def ISP_MCI_H(data, size): # multi-car info
     sock.send(struct.pack("BBBBBBBBBBBB12s",
       ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
 
-      1, #buttonid
+      DRIFT_BUTTON_DEG, #buttonid
       0, #extra flags Inst
       32+128, #button style (color)
       0, #max chars user can type into the btn
 
       90, 60, 10, 5, #hyt
-      heatMapColStr[max(0, min(len(heatMapColStr)-1, int(abs(diff)/12.25)))] + (str(abs(int(diff))) + "°").encode("cp1252")
+      heatMapColStr[ max(0, min(HEATMAPLEN-1, int( abs(diff) / COLPERANGLE ) - 1 ) ) ] + (str(abs(int(diff))) + "°").encode("cp1252")
       ))
     sock.send(struct.pack("BBBBBBBBBBBB12s",
       ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
 
-      2, #buttonid
+      DRIFT_BUTTON_KPH, #buttonid
       0, #extra flags Inst
       32+64, #button style (color)
       0, #max chars user can type into the btn
 
       100, 60, 10, 5, #left top wif hyt
-      heatMapColStr[max(0,min(len(heatMapColStr)-1,int(speed/22.25)))] + (str(int(speed)) + "kph").encode("cp1252")
+      heatMapColStr[ max(0, min(HEATMAPLEN-1, int(speed/22.25))) ] + (str(int(speed)) + "kph").encode("cp1252")
       ))
+    
     
     if abs(diff) < 10:
       continue
@@ -375,21 +387,26 @@ def ISP_MCI_H(data, size): # multi-car info
       continue
     if ((-Scores[LocVel][plid][X] > 0 and diff > 0) or (-Scores[LocVel][plid][X] < 0 and diff < 0)) and abs(diff) < CFG.MAX_DRIFT_ANGLE:
       Scores[Score][plid] = Scores[Score][plid] + (abs(diff) * (speed ** 1.25)) * 0.0125
-      sock.send(struct.pack("BBBBBBBBBBBB12s",
-          ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
-
-          0, #buttonid
-          0, #extra flags Inst
-          32, #button style (color)
-          0, #max chars user can type into the btn
-
-          0, 0, 0, 0, #hyt
-          b"^6" + str(int(Scores[Score][plid])).encode("cp1252"),
-          ))
       # print(f"{Scores[Score][plid]:.1f} {abs(diff):.1f} {-Scores[LocVel][plid][X]:.5f}")
     elif abs(diff) > CFG.MAX_DRIFT_ANGLE and Scores[Score][plid] > 0:
       resetCar(plid, False)
       startTrackingCar(plid)
+
+    # send button update if score has changed ( we do have other things that can change it )
+    if Scores[OldScore][plid] != Scores[Score][plid]:
+      Scores[OldScore][plid] = Scores[Score][plid]
+      sock.send(struct.pack("BBBBBBBBBBBB12s",
+        ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
+
+        DRIFT_BUTTON_SCR, #buttonid
+        0, #extra flags Inst
+        32, #button style (color)
+        0, #max chars user can type into the btn
+
+        0, 0, 0, 0, #hyt
+        b"^6" + str(int(Scores[Score][plid])).encode("cp1252"),
+        # constant col for score cuz we have no upper limit
+        ))
 packetHandler[ISP_MCI] = ISP_MCI_H
 
 def ISP_CRS_H(data, size):
@@ -412,7 +429,7 @@ def ISP_UCO_H(data, size):
     if plid in plidToUcid:
       startTrackingCar(plid)
     else:
-      if IsLocal:
+      if IsLocal: # TODO: MP FIX
         sock.send(struct.pack("BBBB64s",
           ISP_MST_SIZE,
           ISP_MST,
@@ -534,8 +551,10 @@ def ISP_NCN_H(data, size):
 packetHandler[ISP_NCN] = ISP_NCN_H
 
 def ISP_AXI_H(data, size):
-  LayoutID = struct.unpack("32s", data[8:8+32])[0].decode("cp1252").replace("\0","")
-  print("ISP_AXI:", LayoutID)
+  layoutData["id"] = struct.unpack("32s", data[8:8+32])[0].decode("cp1252").replace("\0","")
+  if layoutData["id"] == "":
+    layoutData["id"] = "<empty>"
+  print("ISP_AXI:", layoutData["id"])
 packetHandler[ISP_AXI] = ISP_AXI_H
 
 def ISP_REO_H(data, size):
@@ -555,6 +574,59 @@ def ISP_CSC_H(data, size): # car state change
   print(f"csc:{cscAction} plid:{plid}")
 packetHandler[ISP_CSC] = ISP_CSC_H
 
+
+
+def ISP_OBH_H(data, size):
+  plid = data[3]
+  plname = plidToUName[plid]
+  index = data[size * 4 - 2]
+  if index == 0:
+    x, y = struct.unpack("2h", data[12:16])
+    x /= 16
+    y /= 16
+    print(f"{plname} hit unknown object? @[ {x}, {y} ]")
+  obhflags = data[size * 4 - 1]
+  #wasmoving = obhflags & 4
+  #inorigspot = obhflags & 8
+  # reverse for hitting static objects you get double penalty
+  moveableobject = 0 if (obhflags & 2) == 2 else 1
+
+  print(f"{plname} hit: f:{obhflags} i:{index} ismoveable:{moveableobject}")
+  
+  if not plid in Scores[Tracking]:
+    print("resetting", plid)
+    resetCar(plid, False)
+    startTrackingCar(plid)
+  if not Scores[Tracking][plid]:
+    return
+  pen = False
+  if index in CFG.OBJ_PENALTY_LIST:
+    pen = CFG.OBJ_PENALTY_LIST[index]
+  else:
+    pen = CFG.OBJ_DEFAULT_PENALTY
+
+  Scores[Score][plid] += pen + ( pen * CFG.OBJ_STATIC_PENALTY_MULT * moveableobject )
+  if pen == 0:
+    penCol = "^6"
+  elif pen > 0 :
+    penCol = b"^2"
+  else:
+    penCol = b"^1"
+  sock.send(struct.pack("BBBBBBBBBBBB12s",
+    ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
+
+    DRIFT_BUTTON_SCR, #buttonid
+    0, #extra flags Inst
+    32, #button style (color)
+    0, #max chars user can type into the btn
+
+    0, 0, 0, 0, #hyt
+    penCol + str(int(Scores[Score][plid])).encode("cp1252"),
+    # constant col for score cuz we have no upper limit ->> penaltied color now
+    ))
+  
+
+packetHandler[ISP_OBH] = ISP_OBH_H
 
 
 def netHandler(PacketBuffer, stateMachine):
@@ -615,10 +687,14 @@ def helpFunc():
     es = es + str +" -> "+ hotStrings[str][1] + "\n"
   print(es)
 
+def showLayout():
+  print(layoutData["id"])
+
 hotStrings = {
   "q" : [quitFunc, "quit insim"],
   "h" : [helpFunc, "show all commands"],
   "p" : [showPlFunc, "show all players"],
+  "l" : [showLayout, "print current layout"],
 }
 helpFunc()
 while True:
