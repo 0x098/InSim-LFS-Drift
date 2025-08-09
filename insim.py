@@ -140,20 +140,20 @@ while __dat == b'':
   sock.connect((CFG.REMOTE_HOST, CFG.REMOTE_PORT))
 
   ISI = struct.pack('BBBBHHBcH16s16s', # insim init
-            ISP_ISI_SIZE,   # Size
-            ISP_ISI,     # Type
-            1,       # ReqI
-            0,       # Zero
-            
-            0,       # UDPPort
-            32 + 4 * IsLocal + 128 + 1024,   # Flags
+    ISP_ISI_SIZE,   # Size
+    ISP_ISI,     # Type
+    1,       # ReqI
+    0,       # Zero
+    
+    0,       # UDPPort
+    32 + 4 * IsLocal + 128 + 1024,   # Flags
 
-            INSIM_VERSION, # Sp0
-            b'S',     # Prefix
-            50,     # Interval
+    INSIM_VERSION, # Sp0
+    b'S',     # Prefix
+    50,     # Interval
 
-            CFG.REMOTE_INSIM_PASSWORD,
-            CFG.REMOTE_INSIM_USERNAME)
+    CFG.REMOTE_INSIM_PASSWORD,
+    CFG.REMOTE_INSIM_USERNAME)
 
   sock.send(ISI)
 
@@ -472,24 +472,29 @@ def ISP_LAP_H(data, size):
     uname = plidToUName[plid]
     if IsLocal:
       sock.send(struct.pack("BBBB128s",
-          ISP_MSL_SIZE,
-          ISP_MSL,
-          0,
-          0,
-          f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems/1000}".encode("cp1252")))
+        ISP_MSL_SIZE,
+        ISP_MSL,
+        0,
+        0,
+        f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems/1000}".encode("cp1252")))
     else:
       msg = f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems/1000}".encode("cp1252")
       msglen = ( ( len(msg) + 1) // 4 ) + 1 # needed for guaranteed \0
       sock.send(struct.pack("BBBBBBBB",
-          ISP_MTC_SIZE + msglen, #34,
-          ISP_MTC,
-          0,
-          1,
-          255, #ucid
-          0, #plid
-          0, #usertype
-          0,
-          ) + struct.pack(str(msglen) + "s", msg))
+        ISP_MTC_SIZE + msglen, #34,
+        ISP_MTC,
+        0,
+        1,
+        255, #ucid
+        0, #plid
+        0, #usertype
+        0,
+        ) + struct.pack(str(msglen) + "s", msg))
+    
+    # add database queries here
+    # we will probably never have more than ~5 queries per second unless this is rewritten to be used in multiple servers
+    # this implies that the database system is also rewritten with a queue+handler system
+    
   resetCar(plid)
   startTrackingCar(plid)
 packetHandler[ISP_LAP] = ISP_LAP_H
@@ -524,14 +529,14 @@ def ISP_PLL_H(data, size):
   ucid = plidToUcid[plid]
   
   sock.send(struct.pack("BBBBBBBB", # del all btn
-         2,
-         ISP_BFN,
-         0,
-         1,
-         ucid,
-         0,
-         255,
-         0))
+    2,
+    ISP_BFN,
+    0,
+    1,
+    ucid,
+    0,
+    255,
+    0))
   print("ISP_PLAYERLEAVE", ucid, plid)
 packetHandler[ISP_PLL] = ISP_PLL_H
 
@@ -664,7 +669,7 @@ def netHandler(PacketBuffer, stateMachine):
       data = data[:size * 4]
     packetType = data[1]
     if lastPacketType != packetType:
-      print(f"<<sz[{size}]: type->{T.IDTOSTR[packetType]}")
+      print(f"<<sz[{size}]: type -> {T.IDTOSTR[packetType]}")
       lastPacketType = packetType
     if packetHandler[packetType]:
       packetHandler[packetType](data, size)

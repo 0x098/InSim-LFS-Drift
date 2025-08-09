@@ -13,9 +13,7 @@ green cones and poles add about 100
 
 bale reduces by 100
 
-all other objects also 100
-
-1.5x of this value if its a static object
+all other objects also -100 - 1.5x of this value if its a static object
 
 whenever hitting an object the score goes red (addition < 0 ) or green (addition > 0)
 
