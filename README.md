@@ -14,7 +14,7 @@ all other objects also 100
 1.5x of this value if its a static object
 whenever hitting an object the score goes red (addition < 0 ) or green (addition > 0)
 angle color now works along with config / speed left untouched currently
-+ micro optimizations
+micro optimizations
 
 ![ingame look](https://github.com/0x098/InSim-LFS-Drift/blob/main/img/ingame.png)
 
