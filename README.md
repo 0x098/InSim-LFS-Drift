@@ -5,6 +5,8 @@ open folder in cmd and just py/python3 insim.py
 
 all user-end-point config stuff is in insimconfig.py
 
+oh if u want to use this in __singleplayer__ then put `/insim=<REMOTE_PORT>` (which is `/insim=23232` for me) after `target` entry in your lfs.exe shortcut on desktop.
+
 ## 09.07.25
 added penalty system to reduce or add points depending on object id and if its static or not.
 current config modifies scores as:
