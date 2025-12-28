@@ -12,7 +12,7 @@ REMOTE_INSIM_PASSWORD = b'<password>' # max 16 bytes (chars) #idk if 0byte is al
 
 INSIM_DB_PATH = "insim.db"
 
-MAX_DRIFT_ANGLE = 113
+MAX_DRIFT_ANGLE = 115
 
 
 # this amount gets added to player score if they hit an object
