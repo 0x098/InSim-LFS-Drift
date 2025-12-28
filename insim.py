@@ -8,6 +8,7 @@ import time
 import sqlite3
 import insimconfig as CFG
 import isptranslation as T
+import carlist as N
 
 BUFFER_SIZE = 2048
 INSIM_VERSION = 9
@@ -71,6 +72,8 @@ ISP_OCO_SIZE = 8//4
 ISP_TTC_SIZE = 8//4
 
 TINY_NONE = 0 # keep-alive(heartbeat) packet
+TINY_VER = 1
+TINY_CLOSE = 2
 TINY_NCN = 13 # get NCN (new conncetion packet) for all connection
 TINY_NPL = 14 # get all players
 TINY_NCI = 23 # get NCI for all players (unused atm)
@@ -172,7 +175,8 @@ LastLapTime = 7
 Tracking = 8
 OldScore = 9
 PenaltiesSum = 10
-LastElement = 11
+LapTimeStamp = 11
+LastElement = 12
 
 Scores = []
 
@@ -215,6 +219,8 @@ def unpackCarObj(bytes):
 def startTrackingCar(plid, doPrint=True):
   if not Scores[Tracking][plid]:
     Scores[Tracking][plid] = True
+    if not plid in Scores[LapTimeStamp]:
+      Scores[LapTimeStamp][plid] = time.time()
     print("Tracking:", plid)
     sock.send(struct.pack("BBBBBBBBBBBB4s",
       ISP_BTN_SIZE + 1,
@@ -452,14 +458,25 @@ def ISP_NPL_H(data, size):
   plidToUcid[plid] = ucid
   pname, plate, carname = struct.unpack("24s8s4s", data[8:8+24+8+4])
   plidToUName[plid] = pname.decode("cp1252").replace("\0","")
-  carname = carname.decode("cp1252").replace("\n","").replace("\0","").replace(" ","").replace("\r","").replace("^","")
-  print("ISP_NEWPLAYERJOIN:", size, ucid, plid, plidToUName, carname, plate)
+  #print(carname[::-1].hex().upper()[2:])
+  carname = carname[::-1].hex().upper()[2:]
+  if carname in N.VALID:
+    carname = N.VALID[carname]
+  print(f"ISP_NEWPLAYERJOIN: {size}, {ucid}, {plid}, {plidToUName}, carname({carname}), plate({plate})")
 packetHandler[ISP_NPL] = ISP_NPL_H
 
 def ISP_LAP_H(data, size):
   plid = data[3]
   laptimems = struct.unpack("i",data[4:8])[0]
-  print(Scores[Score][plid], plid, laptimems)
+  #laptimems = curtime - Scores[LapTimeStamp][plid]
+  if laptimems == 3600000:
+    print(Scores[Score][plid], plid, "LOCAL: ", laptimems)
+    curtime = time.time()
+    laptimems = round( curtime - Scores[LapTimeStamp][plid] , 3 )
+    Scores[LapTimeStamp][plid] = curtime # this wont be used furthermore
+  else:
+    laptimems = laptimems / 1000 # since 1000 = 1sec
+    print(Scores[Score][plid], plid, laptimems)
   penalties = False
   penval = Scores[PenaltiesSum][plid]
   if penval == 0: 
@@ -476,9 +493,9 @@ def ISP_LAP_H(data, size):
         ISP_MSL,
         0,
         0,
-        f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems/1000}".encode("cp1252")))
+        f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems}".encode("cp1252")))
     else:
-      msg = f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems/1000}".encode("cp1252")
+      msg = f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems}".encode("cp1252")
       msglen = ( ( len(msg) + 1) // 4 ) + 1 # needed for guaranteed \0
       sock.send(struct.pack("BBBBBBBB",
         ISP_MTC_SIZE + msglen, #34,
@@ -491,6 +508,8 @@ def ISP_LAP_H(data, size):
         0,
         ) + struct.pack(str(msglen) + "s", msg))
     
+
+
     # add database queries here
     # we will probably never have more than ~5 queries per second unless this is rewritten to be used in multiple servers
     # this implies that the database system is also rewritten with a queue+handler system
