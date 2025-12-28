@@ -72,8 +72,11 @@ ISP_OCO_SIZE = 8//4
 ISP_TTC_SIZE = 8//4
 
 TINY_NONE = 0 # keep-alive(heartbeat) packet
-TINY_VER = 1
-TINY_CLOSE = 2
+TINY_VER = 1 # get version
+TINY_CLOSE = 2 # close insim
+TINY_PING = 3 # ping req / heartbeat
+TINY_REPLY = 4 # ping reply
+TINY_VTC = 5 # game vote cancel
 TINY_NCN = 13 # get NCN (new conncetion packet) for all connection
 TINY_NPL = 14 # get all players
 TINY_NCI = 23 # get NCI for all players (unused atm)
@@ -93,9 +96,11 @@ COLPERANGLE = CFG.MAX_DRIFT_ANGLE / HEATMAPLEN
 #// float   4-byte float -> f (4)
 
 
-plidToUcid = {}
-ucidToPlid = {}
-plidToUName = {}
+plidToUcid = {} # player unique id to user connection unique id
+ucidToPlid = {} # user connection unique id to player unique id
+plidToUName = {} # pluid to nicknames
+plidToNName = {} # pluid to actual global lfs user identifiers
+plidToCarName = {}
 
 DRIFT_BUTTON_SCR = 0
 DRIFT_BUTTON_DEG = 1
@@ -113,23 +118,86 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-sqlC = sqlite3.connect(CFG.INSIM_DB_PATH)
+def sendTiny(REQI, TINY_TYPE):
+  sock.send(struct.pack("BBBB",
+    IS_TINY_SIZE,
+    ISP_TINY,
+    REQI,
+    TINY_TYPE)) # TINY_NCN & TINY_NPL
 
-cursor = sqlC.cursor()
+def sendCommand(command):
+  sock.send(struct.pack("BBBB63sB",
+    ISP_MST_SIZE,
+    ISP_MST,
+    0,0,
+    command.encode("cp1252"),0))
 
-cursor.execute('''
-create table if not exists hiScores (
-  id integer primary key,
-  userid text not null,
-  layoutid text not null,
-  score integer not null,
-  displayname text not null,
-  laptime integer not null,
-  unixtime integer 
-  )
-  ''')
+_heartbeatbytes = b'\x01\x03\x00\x00'
+def sendHeartbeat():
+  sock.send(_heartbeatbytes)
 
-sqlC.commit()
+
+# SINCE: sqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread. The object was created in thread id 42576 and this is thread id 4392.
+
+DB = []
+DBOUT = []
+DB_INSERT = 0
+DB_SELECT_ONE = 1
+DB_SELECT_MANY = 2
+
+
+stateMachine = {}
+
+stateMachine["dbMachine"] = 0
+
+def sqfat(stateMachine):
+  sqlC = sqlite3.connect(CFG.INSIM_DB_PATH)
+  cursor = sqlC.cursor()
+  cursor.execute('''
+  create table if not exists hiScores (
+    id integer primary key autoincrement,
+    userid text not null,
+    layoutid text not null,
+    score integer not null,
+    displayname text not null,
+    laptime real not null,
+    carid text not null,
+    unixtime timestamp default current_timestamp
+    )
+    ''')
+
+  sqlC.commit()
+  while stateMachine["dbMachine"] == 0:
+    while len(DB) > 0: # actions that request no output
+      # funny cuz if 
+      cursor.execute(DB[0][1], DB[0][2]) # run regardless lol
+      if DB[0][0] == DB_INSERT:
+        if len(DB) > 1 and DB[1][0] != DB_INSERT:
+          sqlC.commit()
+          print("<db>committing...")
+        #if not DB[1][0] == DB_INSERT: # peek if next one is also an insert. if not then commit.
+      elif DB[0][0] == DB_SELECT_ONE:
+        DBOUT.append(cursor.fetchone()[0]) # sane
+      elif DB[0][0] == DB_SELECT_MANY:
+        DBOUT.append(cursor.fetchall()) # crazy
+      DB.pop(0)
+      time.sleep(0.01)
+  print("exiting db")
+  sqlC.commit()
+  sqlC.close()
+  stateMachine["dbMachine"] = 2 # dead state
+  print("db state 2")
+
+dbthr = threading.Thread(target=sqfat, args=(stateMachine,))
+dbthr.start()
+
+
+def addlap2db(userid, layoutid, score, displayname, laptime, carid):
+  DB.append((
+    DB_INSERT,
+    "insert into hiScores (userid,layoutid,score,displayname,laptime,carid) values (?,?,?,?,?,?)", 
+    (userid,layoutid,score,displayname,laptime,carid)
+  ))
 
 __dat = b''
 __fc = 1
@@ -180,7 +248,6 @@ LastElement = 12
 
 Scores = []
 
-stateMachine = {}
 PacketBuffer = []
 
 stateMachine["heartBeat"] = time.time()
@@ -289,9 +356,7 @@ def netReceiver(pbr, stateMachine):
 receiverThread = threading.Thread(target=netReceiver, args=(PacketBuffer, stateMachine))
 receiverThread.start()
 
-
 packetHandler = [None] * 128
-
 
 def ISP_VER_H(data, size):
   version = data[4 : 4+8].decode("utf-8").replace("\0","")
@@ -303,11 +368,11 @@ packetHandler[ISP_VER] = ISP_VER_H
 def ISP_TINY_H(data, size):
   # stateMachine["heartBeat"]
   if len(data) == 4 and data[3] == TINY_NONE:
-    sock.send(b'\x01\x03\x00\x00')
+    sendHeartbeat()
     stateMachine["heartBeat"] = time.time() - 1
   elif time.time() - stateMachine["heartBeat"] > 30:
     stateMachine["heartBeat"] = time.time() - 1
-    sock.send(b'\x01\x03\x00\x00')
+    sendHeartbeat()
     print("send emergency heartbeat")
 packetHandler[ISP_TINY] = ISP_TINY_H
 
@@ -323,11 +388,7 @@ def ISP_MCI_H(data, size): # multi-car info
     plid = carData[4]
     if not plid in plidToUcid:
       if IsLocal: # TODO this but MP
-        sock.send(struct.pack("BBBB64s",
-          ISP_MST_SIZE,
-          ISP_MST,
-          0,0,
-          "/spec".encode("cp1252")))
+        sendCommand("/spec")
     if not plid in Scores[Tracking]:
       print("resetting", plid)
       resetCar(plid, False)
@@ -443,11 +504,7 @@ def ISP_UCO_H(data, size):
       startTrackingCar(plid)
     else:
       if IsLocal: # TODO: MP FIX
-        sock.send(struct.pack("BBBB64s",
-          ISP_MST_SIZE,
-          ISP_MST,
-          0,0,
-          "/spec".encode("cp1252")))
+        sendCommand("/spec")
 packetHandler[ISP_UCO] = ISP_UCO_H
 
 def ISP_NPL_H(data, size):
@@ -457,12 +514,13 @@ def ISP_NPL_H(data, size):
   ucidToPlid[ucid] = plid
   plidToUcid[plid] = ucid
   pname, plate, carname = struct.unpack("24s8s4s", data[8:8+24+8+4])
-  plidToUName[plid] = pname.decode("cp1252").replace("\0","")
+  plidToNName[plid] = pname.decode("cp1252").replace("\0","")
   #print(carname[::-1].hex().upper()[2:])
   carname = carname[::-1].hex().upper()[2:]
   if carname in N.VALID:
     carname = N.VALID[carname]
-  print(f"ISP_NEWPLAYERJOIN: {size}, {ucid}, {plid}, {plidToUName}, carname({carname}), plate({plate})")
+  plidToCarName[plid] = carname
+  print(f"ISP_NEWPLAYERJOIN: {size}, ucid({ucid}), plid({plid}), nname({plidToNName[plid]}), carname({carname}), plate({plate})")
 packetHandler[ISP_NPL] = ISP_NPL_H
 
 def ISP_LAP_H(data, size):
@@ -485,34 +543,44 @@ def ISP_LAP_H(data, size):
     penalties = "^2+" + str(penval) + "^7"
   else:
     penalties = "^1" + str(penval) + "^7"
-  if plid in plidToUName:
-    uname = plidToUName[plid]
-    if IsLocal:
+  intScore = int(Scores[Score][plid])
+  if plid in plidToUcid:
+    ucid = plidToUcid[plid]
+    nname = plidToNName[plid]
+    msg = f"{nname}^7 -> {intScore} ( {penalties} ) in {laptimems}".encode("cp1252")
+    if ucid == 0: # if player is host 0 == host at all time
       sock.send(struct.pack("BBBB128s",
         ISP_MSL_SIZE,
         ISP_MSL,
         0,
         0,
-        f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems}".encode("cp1252")))
+        msg))
+      addlap2db("localhost", layoutData["id"], intScore, nname, laptimems, plidToCarName[plid])
     else:
-      msg = f"{uname}^7 -> {int(Scores[Score][plid])} ( {penalties} ) in {laptimems}".encode("cp1252")
       msglen = ( ( len(msg) + 1) // 4 ) + 1 # needed for guaranteed \0
       sock.send(struct.pack("BBBBBBBB",
         ISP_MTC_SIZE + msglen, #34,
         ISP_MTC,
         0,
         1,
-        255, #ucid
-        0, #plid
+        255, #receiver ucid
+        0, #receiver plid
         0, #usertype
         0,
         ) + struct.pack(str(msglen) + "s", msg))
-    
+  else:
+    if IsLocal:
+      sendCommand("/spec")
+    else:
+      if plid in plidToNName:
+        sendCommand(f"/spec {plidToNName[plid]}")
+  
 
-
-    # add database queries here
-    # we will probably never have more than ~5 queries per second unless this is rewritten to be used in multiple servers
-    # this implies that the database system is also rewritten with a queue+handler system
+  # player not in plid list
+  # addlap2db
+  # add database queries here
+  # we will probably never have more than ~5 queries per second unless this is rewritten to be used in multiple servers
+  # this implies that the database system is also rewritten with a queue+handler system
     
   resetCar(plid)
   startTrackingCar(plid)
@@ -585,7 +653,10 @@ packetHandler[ISP_RST] = ISP_RST_H
 def ISP_NCN_H(data, size):
   ucid = data[3]
   uname = struct.unpack("24s", data[4:4+24])[0].decode("cp1252")
-  print("THIS NEEDS TO BE REDONE: ISP_NCN:", ucid, uname, data)
+  nname = struct.unpack("24s", data[4+24:4+24+24])[0].decode("cp1252")
+  if sum(bytes(uname,"ascii")) == 0:
+    print("no username == local")
+  print(f"THIS NEEDS TO BE REDONE: ISP_NCN:, ucid({ucid}), uname({uname}), nname({nname}), data({data})")
 packetHandler[ISP_NCN] = ISP_NCN_H
 
 def ISP_AXI_H(data, size):
@@ -616,7 +687,7 @@ packetHandler[ISP_CSC] = ISP_CSC_H
 
 def ISP_OBH_H(data, size):
   plid = data[3]
-  plname = plidToUName[plid]
+  plname = plidToNName[plid]
   index = data[size * 4 - 2]
   if index == 0:
     x, y = struct.unpack("2h", data[12:16])
@@ -674,9 +745,9 @@ def ISP_AXM_H(data, size):
 packetHandler[ISP_AXM] = ISP_AXM_H
 
 
+stateMachine["netHandler"] = 1
 def netHandler(PacketBuffer, stateMachine):
   lastPacketType = 0
-  stateMachine["netHandler"] = 1
   while stateMachine["netHandler"] == 1:
     if len(PacketBuffer) < 1:
       continue
@@ -704,27 +775,36 @@ handlerThread = threading.Thread(target=netHandler, args=(PacketBuffer, stateMac
 handlerThread.start()
 
 
-sock.send(struct.pack("BBBB", IS_TINY_SIZE, ISP_TINY, 1, TINY_AXI))
+# sock.send(struct.pack("BBBB", IS_TINY_SIZE, ISP_TINY, 1, TINY_AXI))
+sendTiny(1, TINY_AXI)
+sendTiny(2, TINY_NCN)
+sendTiny(3, TINY_NPL)
+
 
 def quitFunc():
   try:
-    sock.send(struct.pack("BBBB", IS_TINY_SIZE,  ISP_TINY,  0,  TINY_CLOSE))
+    # sock.send(struct.pack("BBBB", IS_TINY_SIZE,  ISP_TINY,  0,  TINY_CLOSE))
+    sendTiny(0, TINY_CLOSE)
   except:
     print("couldn't send closing packet")
   # send a IS_TINY (4 bytes  bSize bType bReqI bSubT)
   stateMachine["netHandler"] = 2
   stateMachine["netReceiver"] = 2
-  while handlerThread.is_alive():
-    time.sleep(0.1)
+  stateMachine["dbMachine"] = 1 # go die
+  handlerThread.join()
+  print("thr<nethandler>dead")
+  receiverThread.join()
+  print("thr<netreceiver>dead")
   sock.close()
-  sqlC.commit()
-  sqlC.close()
+  print("waiting for db to close")
+  dbthr.join()
+  print("thr<db>dead")
   exit()
 
 def showPlFunc():
   for userconnectionid in ucidToPlid:
     plid = ucidToPlid[userconnectionid]
-    uname = plidToUName[plid]
+    uname = plidToNName[plid]
     print(f"CID : {userconnectionid} > PLID: {plid} > USERNAME: {uname}")
 
 def helpFunc():
@@ -738,13 +818,16 @@ def helpFunc():
 def showLayout():
   print(layoutData["id"])
 
+
 hotStrings = {
   "q" : [quitFunc, "quit insim"],
   "h" : [helpFunc, "show all commands"],
   "p" : [showPlFunc, "show all players"],
   "l" : [showLayout, "print current layout"],
 }
+
 helpFunc()
+
 while True:
   try:
     val = input("")
