@@ -28,7 +28,7 @@ OBJ_PENALTY_LIST = {
 }
 
 # if its not in the list this value gets added instead
-OBJ_DEFAULT_PENALTY = -100
+OBJ_DEFAULT_PENALTY = -50
 
 # how much static objects multiply/add penalty by
 OBJ_STATIC_PENALTY_MULT = 0.5
