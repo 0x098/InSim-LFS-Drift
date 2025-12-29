@@ -149,7 +149,7 @@ DB_SELECT_MANY = 2
 stateMachine = {}
 
 stateMachine["dbMachine"] = 0
-
+RTDBQ = []
 def sqfat(stateMachine):
   sqlC = sqlite3.connect(CFG.INSIM_DB_PATH)
   cursor = sqlC.cursor()
@@ -168,20 +168,34 @@ def sqfat(stateMachine):
 
   sqlC.commit()
   while stateMachine["dbMachine"] == 0:
-    while len(DB) > 0: # actions that request no output
+    queries = len(DB)
+    if queries > 0: # actions that request no output # 1 at a time cuz hurr durr
+      nextsleep = 0.1
       # funny cuz if 
       cursor.execute(DB[0][1], DB[0][2]) # run regardless lol
       if DB[0][0] == DB_INSERT:
-        if len(DB) > 1 and DB[1][0] != DB_INSERT:
-          sqlC.commit()
-          print("<db>committing...")
+        if queries > 1:
+          if DB[1][0] != DB_INSERT:
+            sqlC.commit()
+            print("<db>committing...")
+          else:
+            nextsleep = 0.01
         #if not DB[1][0] == DB_INSERT: # peek if next one is also an insert. if not then commit.
       elif DB[0][0] == DB_SELECT_ONE:
         DBOUT.append(cursor.fetchone()[0]) # sane
       elif DB[0][0] == DB_SELECT_MANY:
         DBOUT.append(cursor.fetchall()) # crazy
       DB.pop(0)
-      time.sleep(0.01)
+      time.sleep(nextsleep)
+    time.sleep(0.01)
+    if len(RTDBQ) > 0:
+      try:
+        cursor.execute(RTDBQ[0])
+        RTDBQ.pop(0)
+        res = cursor.fetchall()
+        print(res)
+      except Exception as e:
+        print("db >> error:", e)
   print("exiting db")
   sqlC.commit()
   sqlC.close()
@@ -192,15 +206,26 @@ dbthr = threading.Thread(target=sqfat, args=(stateMachine,))
 dbthr.start()
 
 
-def addlap2db(userid, layoutid, score, displayname, laptime, carid):
+def addlap2db(userid, layoutid, score, displayname, laptime, carid, callback=print):
   DB.append((
     DB_INSERT,
     "insert into hiScores (userid,layoutid,score,displayname,laptime,carid) values (?,?,?,?,?,?)", 
-    (userid,layoutid,score,displayname,laptime,carid)
+    (userid,layoutid,score,displayname,laptime,carid),
+    callback
   ))
+
+MainThreadID = threading.get_ident()
+
+def db(query):
+  if threading.get_ident() == MainThreadID:
+    RTDBQ.append(query)
+  else:
+    print("db >> invalid thread id. unalive yourself, now!")
 
 __dat = b''
 __fc = 1
+
+print("IsLocal:", IsLocal)
 
 while __dat == b'':
   if __fc:
@@ -230,6 +255,7 @@ while __dat == b'':
 
   __dat = sock.recv(BUFFER_SIZE)
   time.sleep( 1 ) # wait a sec
+
 
 
 OldPos = 0
