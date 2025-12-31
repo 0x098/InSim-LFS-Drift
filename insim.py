@@ -24,7 +24,9 @@ ISP_MTC = 14 # message to connection
 ISP_VTN = 16 # vote notification
 ISP_RST = 17 # race start
 ISP_NCN = 18 # new connection
+ISP_CNL = 19 # connection leave
 ISP_NPL = 21 # new player joined race
+ISP_PLP = 22 # player pit
 ISP_PLL = 23 # player leave
 ISP_LAP = 24 # lap
 ISP_SPX = 25 # lap + split
@@ -98,7 +100,7 @@ COLPERANGLE = CFG.MAX_DRIFT_ANGLE / HEATMAPLEN
 
 plidToUcid = {} # player unique id to user connection unique id
 ucidToPlid = {} # user connection unique id to player unique id
-plidToUName = {} # pluid to nicknames
+ucidToUName = {} # pluid to nicknames
 plidToNName = {} # pluid to actual global lfs user identifiers
 plidToCarName = {}
 
@@ -131,6 +133,28 @@ def sendCommand(command):
     ISP_MST,
     0,0,
     command.encode("cp1252"),0))
+
+def sendLocalMessage(msg):
+  sock.send(struct.pack("BBBB128s",
+    ISP_MSL_SIZE,
+    ISP_MSL,
+    0,
+    0,
+    msg))
+
+def sendMPMessage(msg): # this probably has overhead!
+  #textLength = min(128, len(msg)) # needed for guaranteed \0
+  subTL = min(128, len(msg)) // 4 + 1
+  sock.send(struct.pack(f"BBBBBBBB{subTL*4}s",
+    ISP_MTC_SIZE + subTL, #34,
+    ISP_MTC,
+    0,
+    1,
+    255, #receiver ucid
+    0, #receiver plid
+    0, #usertype
+    0,
+    msg))
 
 _heartbeatbytes = b'\x01\x03\x00\x00'
 def sendHeartbeat():
@@ -190,10 +214,12 @@ def sqfat(stateMachine):
     time.sleep(0.01)
     if len(RTDBQ) > 0:
       try:
-        cursor.execute(RTDBQ[0])
-        RTDBQ.pop(0)
+        Q = RTDBQ.pop(0)
+        cursor.execute(Q)
         res = cursor.fetchall()
-        print(res)
+        if res and len(res) > 0:
+          for r in res:
+            print(r)
       except Exception as e:
         print("db >> error:", e)
   print("exiting db")
@@ -235,7 +261,7 @@ while __dat == b'':
   sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
   sock.connect((CFG.REMOTE_HOST, CFG.REMOTE_PORT))
 
-  ISI = struct.pack('BBBBHHBcH16s16s', # insim init
+  sock.send(struct.pack('BBBBHHBcH16s16s', # insim init
     ISP_ISI_SIZE,   # Size
     ISP_ISI,     # Type
     1,       # ReqI
@@ -249,13 +275,11 @@ while __dat == b'':
     50,     # Interval
 
     CFG.REMOTE_INSIM_PASSWORD,
-    CFG.REMOTE_INSIM_USERNAME)
-
-  sock.send(ISI)
+    CFG.REMOTE_INSIM_USERNAME
+    ))
 
   __dat = sock.recv(BUFFER_SIZE)
   time.sleep( 1 ) # wait a sec
-
 
 
 OldPos = 0
@@ -289,6 +313,16 @@ def normalize(x, y):
     return 0, 0
   return x / length, y / length
 
+def deleteAllButtons(ucid):
+  sock.send(struct.pack("BBBBBBBB", # del all btn
+    2,
+    ISP_BFN,
+    0,
+    1,
+    ucid,
+    0,
+    255,
+    0))
 
 def resetCar(plid, doPrint=True):
   Scores[OldPos][plid] = [0,0]
@@ -311,10 +345,10 @@ def unpackCarObj(bytes):
 
 def startTrackingCar(plid, doPrint=True):
   if not Scores[Tracking][plid]:
+    print("Tracking:", plidToNName[plid])
     Scores[Tracking][plid] = True
     if not plid in Scores[LapTimeStamp]:
       Scores[LapTimeStamp][plid] = time.time()
-    print("Tracking:", plid)
     sock.send(struct.pack("BBBBBBBBBBBB4s",
       ISP_BTN_SIZE + 1,
       ISP_BTN,
@@ -332,7 +366,7 @@ def startTrackingCar(plid, doPrint=True):
       10, #hyt
       b"^60",
       ))
-    print("Sending bt")
+    #print("Sending bt")
     sock.send(struct.pack("BBBBBBBBBBBB12s", # send button to see that stuff
       ISP_BTN_SIZE + 3,
       ISP_BTN,
@@ -402,19 +436,26 @@ def ISP_TINY_H(data, size):
     print("send emergency heartbeat")
 packetHandler[ISP_TINY] = ISP_TINY_H
 
+nextDataSend = {}
+
 def ISP_MCI_H(data, size): # multi-car info
   # bSize bType bReqI bNumC CompCarInfo(size b28)
   bNumC = data[3]
   # wNode:0:1, wLap:2:3, bPlayerID:4, bPositionInRace:5, bInfo:6, bSpacer:7
   # iX:8:12, iY:12:16, iZ:16:20
   # wSpeed:21:22, wDirection:23:24, wHeading:25:26, sAngVel:27:28
+  timestamp = time.time()
   for nThCar in range(bNumC):
     # print(nThCar)
     carData = data[4 + (nThCar * 28):]
     plid = carData[4]
-    if not plid in plidToUcid:
-      if IsLocal: # TODO this but MP
-        sendCommand("/spec")
+    if plid not in nextDataSend:
+      nextDataSend[plid] = timestamp
+    #if not plid in plidToUcid:
+      #if IsLocal: # TODO this but MP
+        #sendCommand("/spec")
+      #else:
+        #print("get this here done asap")
     if not plid in Scores[Tracking]:
       print("resetting", plid)
       resetCar(plid, False)
@@ -456,29 +497,33 @@ def ISP_MCI_H(data, size): # multi-car info
       diff += 360
 
     diff = diff * min(1, max(0, (speed - 10) / 5))
+    canSend = False
+    if nextDataSend[plid] < timestamp:
+      nextDataSend[plid] = timestamp + (0.5 - 0.5 * IsLocal)
+      canSend = True
+    if canSend:
+      sock.send(struct.pack("BBBBBBBBBBBB12s",
+        ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
 
-    sock.send(struct.pack("BBBBBBBBBBBB12s",
-      ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
+        DRIFT_BUTTON_DEG, #buttonid
+        0, #extra flags Inst
+        32+128, #button style (color)
+        0, #max chars user can type into the btn
 
-      DRIFT_BUTTON_DEG, #buttonid
-      0, #extra flags Inst
-      32+128, #button style (color)
-      0, #max chars user can type into the btn
+        90, 60, 10, 5, #hyt
+        heatMapColStr[ max(0, min(HEATMAPLEN-1, int( abs(diff) / COLPERANGLE ) - 1 ) ) ] + (str(abs(int(diff))) + "°").encode("cp1252")
+        ))
+      sock.send(struct.pack("BBBBBBBBBBBB12s",
+        ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
 
-      90, 60, 10, 5, #hyt
-      heatMapColStr[ max(0, min(HEATMAPLEN-1, int( abs(diff) / COLPERANGLE ) - 1 ) ) ] + (str(abs(int(diff))) + "°").encode("cp1252")
-      ))
-    sock.send(struct.pack("BBBBBBBBBBBB12s",
-      ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
+        DRIFT_BUTTON_KPH, #buttonid
+        0, #extra flags Inst
+        32+64, #button style (color)
+        0, #max chars user can type into the btn
 
-      DRIFT_BUTTON_KPH, #buttonid
-      0, #extra flags Inst
-      32+64, #button style (color)
-      0, #max chars user can type into the btn
-
-      100, 60, 10, 5, #left top wif hyt
-      heatMapColStr[ max(0, min(HEATMAPLEN-1, int(speed/22.25))) ] + (str(int(speed)) + "kph").encode("cp1252")
-      ))
+        100, 60, 10, 5, #left top wif hyt
+        heatMapColStr[ max(0, min(HEATMAPLEN-1, int(speed/22.25))) ] + (str(int(speed)) + "kph").encode("cp1252")
+        ))
     
     
     if abs(diff) < 10:
@@ -495,18 +540,19 @@ def ISP_MCI_H(data, size): # multi-car info
     # send button update if score has changed ( we do have other things that can change it )
     if Scores[OldScore][plid] != Scores[Score][plid]:
       Scores[OldScore][plid] = Scores[Score][plid]
-      sock.send(struct.pack("BBBBBBBBBBBB12s",
-        ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
+      if canSend:
+        sock.send(struct.pack("BBBBBBBBBBBB12s",
+          ISP_BTN_SIZE + 3, ISP_BTN, 1, plidToUcid[plid],
 
-        DRIFT_BUTTON_SCR, #buttonid
-        0, #extra flags Inst
-        32, #button style (color)
-        0, #max chars user can type into the btn
+          DRIFT_BUTTON_SCR, #buttonid
+          0, #extra flags Inst
+          32, #button style (color)
+          0, #max chars user can type into the btn
 
-        0, 0, 0, 0, #hyt
-        b"^6" + str(int(Scores[Score][plid])).encode("cp1252"),
-        # constant col for score cuz we have no upper limit
-        ))
+          0, 0, 0, 0, #hyt
+          b"^6" + str(int(Scores[Score][plid])).encode("cp1252"),
+          # constant col for score cuz we have no upper limit
+          ))
 packetHandler[ISP_MCI] = ISP_MCI_H
 
 def ISP_CRS_H(data, size):
@@ -541,6 +587,7 @@ def ISP_NPL_H(data, size):
   plidToUcid[plid] = ucid
   pname, plate, carname = struct.unpack("24s8s4s", data[8:8+24+8+4])
   plidToNName[plid] = pname.decode("cp1252").replace("\0","")
+  Scores[LapTimeStamp][plid] = time.time()
   #print(carname[::-1].hex().upper()[2:])
   carname = carname[::-1].hex().upper()[2:]
   if carname in N.VALID:
@@ -575,25 +622,11 @@ def ISP_LAP_H(data, size):
     nname = plidToNName[plid]
     msg = f"{nname}^7 -> {intScore} ( {penalties} ) in {laptimems}".encode("cp1252")
     if ucid == 0: # if player is host 0 == host at all time
-      sock.send(struct.pack("BBBB128s",
-        ISP_MSL_SIZE,
-        ISP_MSL,
-        0,
-        0,
-        msg))
+      sendLocalMessage(msg)
       addlap2db("localhost", layoutData["id"], intScore, nname, laptimems, plidToCarName[plid])
     else:
-      msglen = ( ( len(msg) + 1) // 4 ) + 1 # needed for guaranteed \0
-      sock.send(struct.pack("BBBBBBBB",
-        ISP_MTC_SIZE + msglen, #34,
-        ISP_MTC,
-        0,
-        1,
-        255, #receiver ucid
-        0, #receiver plid
-        0, #usertype
-        0,
-        ) + struct.pack(str(msglen) + "s", msg))
+      sendMPMessage(msg)
+      addlap2db(ucidToUName[ucid], layoutData["id"], intScore, nname, laptimems, plidToCarName[plid])
   else:
     if IsLocal:
       sendCommand("/spec")
@@ -611,6 +644,7 @@ def ISP_LAP_H(data, size):
   resetCar(plid)
   startTrackingCar(plid)
 packetHandler[ISP_LAP] = ISP_LAP_H
+
 
 def ISP_JRR_H(data, size):
   plid = data[3]
@@ -635,21 +669,19 @@ def ISP_MSO_H(data, size):
     print("", msg.replace("^L",""))
 packetHandler[ISP_MSO] = ISP_MSO_H
 
+def ISP_PLP_H(data, size):
+  plid = data[3]
+  ucid = plidToUcid[plid]
+  resetCar(plid)
+  deleteAllButtons(ucid)
+packetHandler[ISP_PLP] = ISP_PLP_H
+
 def ISP_PLL_H(data, size):
   plid = data[3]
   if not plid in plidToUcid:
     return
   ucid = plidToUcid[plid]
-  
-  sock.send(struct.pack("BBBBBBBB", # del all btn
-    2,
-    ISP_BFN,
-    0,
-    1,
-    ucid,
-    0,
-    255,
-    0))
+  deleteAllButtons(ucid)
   print("ISP_PLAYERLEAVE", ucid, plid)
 packetHandler[ISP_PLL] = ISP_PLL_H
 
@@ -678,12 +710,32 @@ packetHandler[ISP_RST] = ISP_RST_H
 
 def ISP_NCN_H(data, size):
   ucid = data[3]
-  uname = struct.unpack("24s", data[4:4+24])[0].decode("cp1252")
-  nname = struct.unpack("24s", data[4+24:4+24+24])[0].decode("cp1252")
+  uname = struct.unpack("24s", data[4:4+24])[0].decode("cp1252").replace("\0","")
+  nname = struct.unpack("24s", data[4+24:4+24+24])[0].decode("cp1252").replace("\0","")
+  ucidToUName[ucid] = uname
   if sum(bytes(uname,"ascii")) == 0:
     print("no username == local")
-  print(f"THIS NEEDS TO BE REDONE: ISP_NCN:, ucid({ucid}), uname({uname}), nname({nname}), data({data})")
+  #print(f"THIS NEEDS TO BE REDONE: ISP_NCN:, ucid({ucid}), uname({uname}), nname({nname})")
 packetHandler[ISP_NCN] = ISP_NCN_H
+
+LeaveReasons = ["no reason","timed out",
+  "lost connection", "kicked", "banned",
+  "security", "cheat proection wrong",
+  "out of sync", "join out of sync",
+  "invalid packet (HACK)"
+]
+
+def ISP_CNL_H(data, size):
+  ucid = data[3]
+  reason = data[4]
+  plid = ucidToPlid[ucid]
+  name = ucidToUName[ucid]
+  plidToCarName[plid] = None
+  plidToNName[plid] = None
+  ucidToUName[ucid] = None
+  ucidToPlid[ucid] = None
+  print(f"{name} left due {LeaveReasons[reason]}")
+packetHandler[ISP_CNL] = ISP_CNL_H
 
 def ISP_AXI_H(data, size):
   layoutData["id"] = struct.unpack("32s", data[8:8+32])[0].decode("cp1252").replace("\0","")
@@ -828,10 +880,13 @@ def quitFunc():
   exit()
 
 def showPlFunc():
-  for userconnectionid in ucidToPlid:
-    plid = ucidToPlid[userconnectionid]
-    uname = plidToNName[plid]
-    print(f"CID : {userconnectionid} > PLID: {plid} > USERNAME: {uname}")
+  for ucid in ucidToPlid:
+    plid = ucidToPlid[ucid]
+    uname = ucidToUName[ucid]
+    nname = plidToNName[plid]
+    #print(uname, nname, plid)
+    print( f"UCID : {ucid} > PLID: {plid} > USERNAME: {uname} ( {nname} )" )
+
 
 def helpFunc():
   es = "\n"
@@ -844,6 +899,10 @@ def helpFunc():
 def showLayout():
   print(layoutData["id"])
 
+def pt(x):
+  for k, v in (x.items() if hasattr(x, "items") else enumerate(x)):
+    print(f"[{k}] = {v} ({type(v)})")
+
 
 hotStrings = {
   "q" : [quitFunc, "quit insim"],
@@ -853,6 +912,8 @@ hotStrings = {
 }
 
 helpFunc()
+
+
 
 while True:
   try:
@@ -865,4 +926,4 @@ while True:
     #print("avoid keyboardinterrupt! use q !")
     quitFunc()
   except Exception as e:
-    print(e)
+    print("input>>error:", e)
